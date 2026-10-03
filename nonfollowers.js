@@ -1,12 +1,8 @@
 (() => {
   'use strict';
 
-  const PAGE_DELAY = 1200;
-  const LONG_PAUSE_EVERY = 15;
-  const LONG_PAUSE = 10000;
   const DEFAULT_MIN_FOLLOWERS = 10000;
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const getCookie = (name) => {
     const m = document.cookie.match('(^|;)\\s*' + name + '=([^;]*)');
     return m ? decodeURIComponent(m[2]) : null;
@@ -74,8 +70,7 @@
   const body = el('div', { padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px', minHeight: '0', flex: '1' });
 
   const info = el('div', { color: C.muted, fontSize: '14px', lineHeight: '1.5' },
-    'Lists the accounts you follow that do not follow you back. ' +
-    'Requests are spaced out to avoid rate limits, so this may take a few minutes.');
+    'Lists the accounts you follow that do not follow you back.');
 
   function checkbox(text, checked) {
     const label = el('label', { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', cursor: 'pointer', fontSize: '14px' });
@@ -101,9 +96,7 @@
   threshold.disabled = true;
   optFollowers.label.append(threshold, document.createTextNode('followers'));
   optFollowers.cb.onchange = () => { threshold.disabled = !optFollowers.cb.checked; };
-  const followersNote = el('div', { fontSize: '12px', color: C.muted, lineHeight: '1.4' },
-    'Checking follower counts sends one extra request per account and makes the scan slower.');
-  options.append(optVerified.label, optFollowers.label, followersNote);
+  options.append(optVerified.label, optFollowers.label);
 
   const startBtn = el('button', btnStyle(C.accent), 'Start');
 
@@ -137,7 +130,6 @@
   let stopped = false;
   let results = { regular: [], celebrities: [] };
   let activeTab = 'regular';
-  let requestCount = 0;
 
   function setProgress(text, pct) {
     status.textContent = text;
@@ -207,36 +199,13 @@
     setTimeout(() => (copyBtn.textContent = 'Copy list'), 2000);
   };
 
-  async function politePause() {
-    requestCount++;
-    if (requestCount % LONG_PAUSE_EVERY === 0) {
-      const old = status.textContent;
-      status.textContent = old + ' (pausing)';
-      await sleep(LONG_PAUSE);
-    } else {
-      await sleep(PAGE_DELAY);
-    }
-  }
-
   const API_HEADERS = { 'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest' };
 
   async function api(url) {
-    for (let attempt = 1; ; attempt++) {
-      if (stopped) throw new Error('Stopped');
-      const res = await fetch(url, { credentials: 'include', headers: API_HEADERS });
-      if (res.status === 429 && attempt <= 3) {
-        const before = status.textContent;
-        for (let s = 60 * attempt; s > 0; s--) {
-          if (stopped) throw new Error('Stopped');
-          status.textContent = `Rate limited by Instagram. Retrying in ${s}s (attempt ${attempt} of 3)`;
-          await sleep(1000);
-        }
-        status.textContent = before;
-        continue;
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status} (${url.split('?')[0]})`);
-      return res.json();
-    }
+    if (stopped) throw new Error('Stopped');
+    const res = await fetch(url, { credentials: 'include', headers: API_HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status} (${url.split('?')[0]})`);
+    return res.json();
   }
 
   async function getExpectedFollowingCount() {
@@ -254,38 +223,26 @@
       if (typeof j?.user?.follower_count === 'number') return j.user.follower_count;
     } catch (err) {
       if (stopped) throw err;
-      console.warn('[non-followers] users/info failed for', u.username, err);
     }
     try {
-      await sleep(PAGE_DELAY);
       const j = await api(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(u.username)}`);
       const count = j?.data?.user?.edge_followed_by?.count;
       if (typeof count === 'number') return count;
     } catch (err) {
       if (stopped) throw err;
-      console.warn('[non-followers] web_profile_info failed for', u.username, err);
     }
     return null;
   }
 
   async function fetchList(kind, label, from, to) {
     const users = new Map();
-    const seenCursors = new Set();
     let maxId = '';
     do {
       const json = await api(`/api/v1/friendships/${userId}/${kind}/?count=50` +
         (maxId ? '&max_id=' + encodeURIComponent(maxId) : ''));
-      const before = users.size;
       for (const u of json.users || []) users.set(String(u.pk), u);
       maxId = json.next_max_id || '';
-      if (maxId && seenCursors.has(maxId)) break;
-      if (maxId && users.size === before) {
-        console.warn(`[non-followers] ${kind}: page returned no new users, stopped at ${users.size}`);
-        break;
-      }
-      seenCursors.add(maxId);
       setProgress(`${label}: ${users.size} loaded`, from + Math.min(to - from - 1, users.size / 20));
-      if (maxId) await politePause();
     } while (maxId && !stopped);
     return [...users.values()];
   }
@@ -293,12 +250,10 @@
   async function scan(opts) {
     setProgress('Loading profile', 0);
     const expectedFollowing = await getExpectedFollowingCount();
-    await sleep(PAGE_DELAY);
 
     const following = await fetchList('following', 'Loading following', 0, 20);
     if (stopped) return null;
     if (!following.length) throw new Error('Following list is empty');
-    await sleep(PAGE_DELAY);
 
     const followers = await fetchList('followers', 'Loading followers', 20, 30);
     if (stopped) return null;
@@ -309,11 +264,9 @@
     const nonFollowers = [];
     for (let i = 0; i < toCheck.length; i++) {
       if (stopped) return null;
-      await politePause();
       const u = toCheck[i];
       const s = await api(`/api/v1/friendships/show/${u.pk}/`);
       if (typeof s?.followed_by !== 'boolean') {
-        console.error('[non-followers] unexpected response', u.username, s);
         throw new Error('Unexpected response for ' + u.username);
       }
       if (!s.followed_by) {
@@ -338,7 +291,6 @@
     let unknownCounts = 0;
     for (let i = 0; i < needCount.length; i++) {
       if (stopped) return null;
-      await politePause();
       const u = needCount[i];
       u.followerCount = await getFollowerCount(u);
       if (u.followerCount == null) unknownCounts++;
@@ -370,30 +322,26 @@
 
     try {
       const r = await scan(opts);
-      if (!r) return;
+      if (!r || stopped) return;
+
       results = { regular: r.regular, celebrities: r.celebrities };
-      console.log('[non-followers]', r);
       const total = r.regular.length + r.celebrities.length;
       let msg = `Done. Checked ${r.checkedCount} of the ${r.followingCount} accounts you follow. ` +
         `${total} of them do not follow you back.`;
       if (r.unknownCounts) {
         msg += ` Follower count could not be loaded for ${r.unknownCounts} accounts, so they are listed under Regular.`;
       }
-      const missing = r.expectedFollowing != null && r.followingCount < r.expectedFollowing;
-      if (missing) {
-        msg += ` Warning: your profile shows ${r.expectedFollowing} following, but only ${r.followingCount} could be loaded. ` +
-          'The missing accounts were not checked.';
-      }
       setProgress(msg, 100);
-      status.style.color = missing ? '#ffb020' : C.text;
+      status.style.color = C.text;
       tabs.style.display = 'flex';
       toolbar.style.display = 'flex';
       renderList();
+
     } catch (err) {
       if (stopped) return;
       console.error('[non-followers]', err);
       status.style.color = '#ff6b6b';
-      setProgress(`Error: ${err.message}. Instagram may be rate limiting you. Wait a while and try again.`);
+      setProgress(`Error: ${err.message}`);
     }
   };
 })();
